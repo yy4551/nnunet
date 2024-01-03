@@ -34,11 +34,26 @@ class SimpleITKIO(BaseReaderWriter):
 
         spacings_for_nnunet = []
         for f in image_fnames:
+            # 图片读进来
             itk_image = sitk.ReadImage(f)
+            # 获取图片的spacing, origin, direction
+            # 这些信息转成nparray后就没有了，所以要提前存下来
             spacings.append(itk_image.GetSpacing())
             origins.append(itk_image.GetOrigin())
             directions.append(itk_image.GetDirection())
+            # itk转为nparray
             npy_image = sitk.GetArrayFromImage(itk_image)
+
+            # 它在调个儿:
+            # >>>import SimpleITK as sitk
+            # >>>img = sitk.ReadImage(r"C:\\Git\\DataSet\\nnunet\\raw\\Dataset011_quarter_ACDC\\imagesTr\\0001_0000.nii.gz")
+            # >>>img.GetSpacing()
+            # (1.0, 1.0, 8.0)
+            # >>>npy = sitk.GetArrayFromImage(img)
+            # >>>npy.shape
+            # (16, 256, 256)
+            # 可见sitk这个库返回图像和返回spacing的顺序不一样！
+
             if npy_image.ndim == 2:
                 # 2d
                 npy_image = npy_image[None, None]
@@ -97,6 +112,8 @@ class SimpleITKIO(BaseReaderWriter):
             print(image_fnames)
             raise RuntimeError()
 
+        # images[0].shape : (1, 16, 256, 256)
+        # stacked_images.shape : (1, 16, 256, 256)
         stacked_images = np.vstack(images)
         dict = {
             'sitk_stuff': {
@@ -110,6 +127,11 @@ class SimpleITKIO(BaseReaderWriter):
             'spacing': spacings_for_nnunet[0]
         }
         return stacked_images.astype(np.float32), dict
+        # 返回的是一个nparray图像和一个字典
+        # dict = {'sitk_stuff': {'spacing':
+        #                        'origin':
+        #                        'direction':  },
+        #         'spacing': }
 
     def read_seg(self, seg_fname: str) -> Tuple[np.ndarray, dict]:
         return self.read_images((seg_fname, ))
@@ -127,3 +149,17 @@ class SimpleITKIO(BaseReaderWriter):
         itk_image.SetDirection(properties['sitk_stuff']['direction'])
 
         sitk.WriteImage(itk_image, output_fname, True)
+
+
+if __name__ == "__main__":
+    sitkrw = SimpleITKIO()
+    img_path = [r"C:\Git\DataSet\nnunet\raw\Dataset011_quarter_ACDC\imagesTr\0000_0000.nii.gz",
+                r"C:\Git\DataSet\nnunet\raw\Dataset011_quarter_ACDC\imagesTr\0001_0000.nii.gz",
+                r"C:\Git\DataSet\nnunet\raw\Dataset011_quarter_ACDC\imagesTr\0002_0000.nii.gz",
+                r"C:\Git\DataSet\nnunet\raw\Dataset011_quarter_ACDC\imagesTr\0003_0000.nii.gz",
+                r"C:\Git\DataSet\nnunet\raw\Dataset011_quarter_ACDC\imagesTr\0004_0000.nii.gz",
+                r"C:\Git\DataSet\nnunet\raw\Dataset011_quarter_ACDC\imagesTr\0005_0000.nii.gz"]
+
+    seg_path = r"C:\Git\DataSet\nnunet\raw\Dataset011_quarter_ACDC\labelsTr\0001.nii.gz"
+    img, img_dict = sitkrw.read_images(img_path)
+    pass

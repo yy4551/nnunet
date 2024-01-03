@@ -23,6 +23,9 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
             # self._data.load_case(i) (see nnUNetDataset.load_case)
             shape = data.shape[1:]
             dim = len(shape)
+            # properties['class_locations']是字典
+            # {1：所有1的坐标位置   shape=(n1,4),n1是case中1的个数
+            #  2：所有2的坐标位置   shape=(n2,4),n2是case中2的个数 ...}
             bbox_lbs, bbox_ubs = self.get_bbox(shape, force_fg, properties['class_locations'])
 
             # whoever wrote this knew what he was doing (hint: it was me). We first crop the data to the region of the
@@ -42,6 +45,9 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
             this_slice = tuple([slice(0, seg.shape[0])] + [slice(i, j) for i, j in zip(valid_bbox_lbs, valid_bbox_ubs)])
             seg = seg[this_slice]
 
+            # 只有bbox_lbs[i]为负值时才会padding
+            # 只有bbox_ubs[i] > shape[i],也即bbox上界超出image的范围时才会padding
+            # 如果超了，就会导致patch的实际尺寸不足，padding
             padding = [(-min(0, bbox_lbs[i]), max(bbox_ubs[i] - shape[i], 0)) for i in range(dim)]
             data_all[j] = np.pad(data, ((0, 0), *padding), 'constant', constant_values=0)
             seg_all[j] = np.pad(seg, ((0, 0), *padding), 'constant', constant_values=-1)
@@ -50,7 +56,34 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
 
 
 if __name__ == '__main__':
-    folder = '/media/fabian/data/nnUNet_preprocessed/Dataset002_Heart/3d_fullres'
-    ds = nnUNetDataset(folder, 0)  # this should not load the properties!
-    dl = nnUNetDataLoader3D(ds, 5, (16, 16, 16), (16, 16, 16), 0.33, None, None)
-    a = next(dl)
+    import pickle
+
+    # folder = r'C:\Git\DataSet\nnunet\preprocessed\Dataset011_quarter_ACDC\nnUNetPlans_3d_fullres'
+    # ds = nnUNetDataset(folder)  # this should not load the properties!
+    ds = pickle.load(open(r'C:\Git\NeuralNetwork\nnunet\nnunetv2\training\dataloading\data_from_nnunet_dataset.pkl', 'rb'))
+
+    from nnunetv2.utilities.label_handling.label_handling import LabelManager
+
+    label_dict =  {
+        "background": 0,
+        "F1+F2+F3":[1, 2, 3],
+        "F2+F3":[2, 3],
+        "F1+F3":[3]
+    }
+
+    temp = np.zeros([1, 64, 64, 64])
+    temp[0, 10:40, 10:40, 10:40] = 1
+    temp[0, 15:35, 15:35, 15:35] = 2
+    temp[0, 20:30, 20:30, 20:30] = 3
+
+    l1 = np.argwhere(temp == 1)
+    l2 = np.argwhere(temp == 2)
+    l3 = np.argwhere(temp == 3)
+    class_locations={1:l1,2:l2,3:l3}
+
+
+    lm = LabelManager(label_dict,[1,2,3])
+    dl = nnUNetDataLoader3D(ds, 5, (16, 16, 16), (16, 16, 16),lm,0.33, None)
+    dl.generate_train_batch()
+
+

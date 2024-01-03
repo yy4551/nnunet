@@ -15,6 +15,7 @@ from nnunetv2.configuration import default_num_processes
 from nnunetv2.utilities.utils import get_filenames_of_train_images_and_targets
 
 
+
 def extract_fingerprint_dataset(dataset_id: int,
                                 fingerprint_extractor_class: Type[
                                     DatasetFingerprintExtractor] = DatasetFingerprintExtractor,

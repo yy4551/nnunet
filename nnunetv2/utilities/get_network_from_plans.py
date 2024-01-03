@@ -17,16 +17,19 @@ def get_network_from_plans(plans_manager: PlansManager,
     num_input_channels can differ depending on whether we do cascade. Its best to make this info available in the
     trainer rather than inferring it again from the plans here.
     """
+    #number of stages = number of convolution kernels
     num_stages = len(configuration_manager.conv_kernel_sizes)
 
+    # ks dim = network dim = convolution operation dim
     dim = len(configuration_manager.conv_kernel_sizes[0])
     conv_op = convert_dim_to_conv_op(dim)
 
     label_manager = plans_manager.get_label_manager(dataset_json)
 
+    # PlainConvUNet or ResidualEncoderUNet to use?
     segmentation_network_class_name = configuration_manager.UNet_class_name
     mapping = {
-        'PlainConvUNet': PlainConvUNet,
+        'PlainConvUNet': PlainConvUNet, # 这里的PlainConvUNet和ResidualEncoderUNet是两个类
         'ResidualEncoderUNet': ResidualEncoderUNet
     }
     kwargs = {
@@ -52,12 +55,18 @@ def get_network_from_plans(plans_manager: PlansManager,
                                                               'the init of your nnUNetModule to accommodate that.'
     network_class = mapping[segmentation_network_class_name]
 
+    #stage decoder有：
+    # PlainConvUNet 对应 n_conv_per_stage
+    # ResidualEncoderUNet 对应 n_blocks_per_stage
     conv_or_blocks_per_stage = {
         'n_conv_per_stage'
         if network_class != ResidualEncoderUNet else 'n_blocks_per_stage': configuration_manager.n_conv_per_stage_encoder,
         'n_conv_per_stage_decoder': configuration_manager.n_conv_per_stage_decoder
     }
+
     # network class name!!
+    # call the two class(ResidualEncoderUNet or PlainConvUNet)
+    # instantialize it,assign to model
     model = network_class(
         input_channels=num_input_channels,
         n_stages=num_stages,

@@ -1,4 +1,5 @@
 import os
+import sys
 import socket
 from typing import Union, Optional
 
@@ -211,6 +212,17 @@ def run_training(dataset_name_or_id: Union[str, int],
 def run_training_entry():
     import argparse
     parser = argparse.ArgumentParser()
+    sys.argv = [
+        'run_training.py',
+        '11',
+        '3d_fullres',
+        '0',
+
+
+        '-num_gpus', '1',
+
+        '-device', 'cuda'
+    ]
     parser.add_argument('dataset_name_or_id', type=str,
                         help="Dataset name or ID to train with")
     parser.add_argument('configuration', type=str,
@@ -249,6 +261,7 @@ def run_training_entry():
                     help="Use this to set the device the training should run with. Available options are 'cuda' "
                          "(GPU), 'cpu' (CPU) and 'mps' (Apple M1/M2). Do NOT use this to set which GPU ID! "
                          "Use CUDA_VISIBLE_DEVICES=X nnUNetv2_train [...] instead!")
+
     args = parser.parse_args()
 
     assert args.device in ['cpu', 'cuda', 'mps'], f'-device must be either cpu, mps or cuda. Other devices are not tested/supported. Got: {args.device}.'
@@ -271,4 +284,5 @@ def run_training_entry():
 
 
 if __name__ == '__main__':
+
     run_training_entry()

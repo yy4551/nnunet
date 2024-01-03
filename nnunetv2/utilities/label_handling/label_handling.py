@@ -66,6 +66,7 @@ class LabelManager(object):
             if k == 'ignore':
                 continue
             if isinstance(r, (tuple, list)):
+                # 注意：如果一个region对应多个标签，此处把他们全拆开，逐个int附到all_labels里
                 for ri in r:
                     all_labels.append(int(ri))
             else:
@@ -76,8 +77,10 @@ class LabelManager(object):
 
     def _get_regions(self) -> Union[None, List[Union[int, Tuple[int, ...]]]]:
         if not self._has_regions or self._force_use_labels:
+            # self._has_regions=0 or self._force_use_labels=1,return None directly
             return None
         else:
+            # _has_regions=1 and _force_use_labels=0,region_class_order must exist
             assert self.regions_class_order is not None, 'if region-based training is requested then you need to ' \
                                                          'define regions_class_order!'
             regions = []
@@ -86,6 +89,7 @@ class LabelManager(object):
                 if k == 'ignore':
                     continue
                 # ignore regions that are background
+                # for "background":0  or "background":[0]
                 if (np.isscalar(r) and r == 0) \
                         or \
                         (isinstance(r, (tuple, list)) and len(np.unique(r)) == 1 and np.unique(r)[0] == 0):
@@ -283,9 +287,12 @@ def convert_labelmap_to_one_hot(segmentation: Union[np.ndarray, torch.Tensor],
 def determine_num_input_channels(plans_manager: PlansManager,
                                  configuration_or_config_manager: Union[str, ConfigurationManager],
                                  dataset_json: dict) -> int:
+    # 用PlansManager和Configuration(Str)/ConfigurationManager来确定输入通道数
     if isinstance(configuration_or_config_manager, str):
+        # 如果输入的是Configuration的名字（如“2d”，“3d_fullres“等），就对其调用get_configuration
         config_manager = plans_manager.get_configuration(configuration_or_config_manager)
     else:
+        # 输入的是ConfigurationManager，直接assign
         config_manager = configuration_or_config_manager
 
     label_manager = plans_manager.get_label_manager(dataset_json)

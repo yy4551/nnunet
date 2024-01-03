@@ -11,11 +11,16 @@ class Convert3DTo2DTransform(AbstractTransform):
         self.apply_to_keys = apply_to_keys
 
     def __call__(self, **data_dict):
+        # 读进来的data_dict应该是包含data：data_tensor, seg：seg_tensor
         for k in self.apply_to_keys:
+            # 把convert之前的shape存到shp里
             shp = data_dict[k].shape
             assert len(shp) == 5, 'This transform only works on 3D data, so expects 5D tensor (b, c, x, y, z) as input.'
+            # data_tensor的shape是(b, c, depth, width, height)，channel和depth合并
             data_dict[k] = data_dict[k].reshape((shp[0], shp[1] * shp[2], shp[3], shp[4]))
+            # 往输入的dict里存一个key，value就是shp
             shape_key = f'orig_shape_{k}'
+            # 这个key不能和已有的keys重复
             assert shape_key not in data_dict.keys(), f'Convert3DTo2DTransform needs to store the original shape. ' \
                                                       f'It does that using the {shape_key} key. That key is ' \
                                                       f'already taken. Bummer.'

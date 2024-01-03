@@ -24,13 +24,16 @@ class DatasetFingerprintExtractor(object):
         Philosophy here is to do only what we really need. Don't store stuff that we can easily read from somewhere
         else. Don't compute stuff we don't need (except for intensity_statistics_per_channel)
         """
+        # dataset_name一定是一个字符串并且以“Dataset”开头
         dataset_name = maybe_convert_to_dataset_name(dataset_name_or_id)
+        self.dataset_name = dataset_name
+
         self.verbose = verbose
 
-        self.dataset_name = dataset_name
         self.input_folder = join(nnUNet_raw, dataset_name)
         self.num_processes = num_processes
         self.dataset_json = load_json(join(self.input_folder, 'dataset.json'))
+        # self.dataset是一个字典，格式内容和nnUNetDataset的实例的格式完全相同
         self.dataset = get_filenames_of_train_images_and_targets(self.input_folder, self.dataset_json)
 
         # We don't want to use all foreground voxels because that can accumulate a lot of data (out of memory). It is
@@ -44,6 +47,8 @@ class DatasetFingerprintExtractor(object):
         """
         images=image with multiple channels = shape (c, x, y(, z))
         """
+        # 输入的np.ndarray是单个img和seg的nparray
+        # 输出的intensities_per_channel是list = [img的channel0的num_samples个label>0的像素值，img的channel1的num_samples个label>0的像素值，...]
         assert images.ndim == 4
         assert segmentation.ndim == 4
 
@@ -57,14 +62,18 @@ class DatasetFingerprintExtractor(object):
         intensity_statistics_per_channel = []
 
         # segmentation is 4d: 1,x,y,z. We need to remove the empty dimension for the following code to work
+        # 只保留foreground，即label>0的部分,label=0就是background了，滤掉
         foreground_mask = segmentation[0] > 0
 
         for i in range(len(images)):
+            # len(images)是channel数，这个循环是对每个channel进行的，不是对img
+
             foreground_pixels = images[i][foreground_mask]
             num_fg = len(foreground_pixels)
             # sample with replacement so that we don't get issues with cases that have less than num_samples
             # foreground_pixels. We could also just sample less in those cases but that would than cause these
             # training cases to be underrepresented
+            # 有放回地随机抽，这样即使前景的像素很少也可以保证抽够一定数量
             intensities_per_channel.append(
                 rs.choice(foreground_pixels, num_samples, replace=True) if num_fg > 0 else [])
             intensity_statistics_per_channel.append({
@@ -82,7 +91,10 @@ class DatasetFingerprintExtractor(object):
     @staticmethod
     def analyze_case(image_files: List[str], segmentation_file: str, reader_writer_class: Type[BaseReaderWriter],
                      num_samples: int = 10000):
+        # reader_writer_class对3d图像来说就是用sitk库还是用nibabel库
+        #
         rw = reader_writer_class()
+
         images, properties_images = rw.read_images(image_files)
         segmentation, properties_seg = rw.read_seg(segmentation_file)
 
@@ -90,6 +102,7 @@ class DatasetFingerprintExtractor(object):
         # Downside is that we need to do this twice (once here and once during preprocessing). Upside is that we don't
         # need to save the cropped data anymore. Given that cropping is not too expensive it makes sense to do it this
         # way. This is only possible because we are now using our new input/output interface.
+        # 把一个3d array的黑边截掉，返回截掉黑边后的3d array，黑边内位置为nonzero_label的seg，截去黑边后的尺寸bbox
         data_cropped, seg_cropped, bbox = crop_to_nonzero(images, segmentation)
 
         foreground_intensities_per_channel, foreground_intensity_stats_per_channel = \
@@ -108,10 +121,13 @@ class DatasetFingerprintExtractor(object):
         # we do not save the properties file in self.input_folder because that folder might be read-only. We can only
         # reliably write in nnUNet_preprocessed and nnUNet_results, so nnUNet_preprocessed it is
         preprocessed_output_folder = join(nnUNet_preprocessed, self.dataset_name)
+        # 没有就创建，有的话保持
         maybe_mkdir_p(preprocessed_output_folder)
         properties_file = join(preprocessed_output_folder, 'dataset_fingerprint.json')
 
         if not isfile(properties_file) or overwrite_existing:
+            # if file not exist or overwrite allowed
+            # 只有dataset_fingerprint.json不存在或者允许overwrite的时候才会运行：
             reader_writer_class = determine_reader_writer_from_dataset_json(self.dataset_json,
                                                                             # yikes. Rip the following line
                                                                             self.dataset[self.dataset.keys().__iter__().__next__()]['images'][0])
@@ -121,9 +137,9 @@ class DatasetFingerprintExtractor(object):
                                                   len(self.dataset))
 
             r = []
-            with multiprocessing.get_context("spawn").Pool(self.num_processes) as p:
+            with multiprocessing.get_context("spawn").Pool(self.num_processes) as p: # p is a pool of processors
                 for k in self.dataset.keys():
-                    r.append(p.starmap_async(DatasetFingerprintExtractor.analyze_case,
+                    r.append(p.starmap_async(DatasetFingerprintExtractor.analyze_case, # r is a list of results
                                              ((self.dataset[k]['images'], self.dataset[k]['label'], reader_writer_class,
                                                num_foreground_samples_per_case),)))
                 remaining = list(range(len(self.dataset)))
@@ -151,6 +167,11 @@ class DatasetFingerprintExtractor(object):
             #                 (training_images_per_case, training_labels_per_case),
             #                 processes=self.num_processes, zipped=True, reader_writer_class=reader_writer_class,
             #                 num_samples=num_foreground_samples_per_case, disable=self.verbose)
+
+            #r[1].get()[0]
+            # ((16, 231, 256), [8.0, 1.0, 1.0], [array([ 30.,  12., 122., ...,  17.,  33.,  85.],
+            # dtype=float32)], [{'mean': 38.658962, 'median': 33.0, 'min': -14.0,
+            # 'max': 183.0, 'percentile_99_5': 137.0, 'percentile_00_5': 1.0}], 0.90234375)
             results = [i.get()[0] for i in r]
 
             shapes_after_crop = [r[0] for r in results]
@@ -165,8 +186,8 @@ class DatasetFingerprintExtractor(object):
                                  if 'channel_names' in self.dataset_json.keys()
                                  else self.dataset_json['modality'].keys())
             intensity_statistics_per_channel = {}
-            for i in range(num_channels):
-                intensity_statistics_per_channel[i] = {
+            for i in range(num_channels):  # i stand for channel
+                intensity_statistics_per_channel[i] = { #value of dict
                     'mean': float(np.mean(foreground_intensities_per_channel[i])),
                     'median': float(np.median(foreground_intensities_per_channel[i])),
                     'std': float(np.std(foreground_intensities_per_channel[i])),
@@ -176,7 +197,7 @@ class DatasetFingerprintExtractor(object):
                     'percentile_00_5': float(np.percentile(foreground_intensities_per_channel[i], 0.5)),
                 }
 
-            fingerprint = {
+            fingerprint = { # there's no order in dict
                     "spacings": spacings,
                     "shapes_after_crop": shapes_after_crop,
                     'foreground_intensity_properties_per_channel': intensity_statistics_per_channel,
@@ -195,5 +216,7 @@ class DatasetFingerprintExtractor(object):
 
 
 if __name__ == '__main__':
-    dfe = DatasetFingerprintExtractor(2, 8)
-    dfe.run(overwrite_existing=False)
+    img = np.random.random((1, 16, 256, 256))
+    seg = np.random.randint(0,3,(1, 16, 256, 256))
+    dfe = DatasetFingerprintExtractor(11, 6)
+    dfe.run(overwrite_existing=True)

@@ -204,7 +204,7 @@ class PlansManager(object):
             parent_config_name = configuration['inherits_from']
 
             if visited is None:
-                visited = (configuration_name,)
+                visited = (configuration_name,) # 从哪个父类继承来的？ 把父类的名字压入visited
             else:
                 if parent_config_name in visited:
                     raise RuntimeError(f"Circular dependency detected. The following configurations were visited "
@@ -227,7 +227,9 @@ class PlansManager(object):
         configuration_dict = self._internal_resolve_configuration_inheritance(configuration_name)
         return ConfigurationManager(configuration_dict)
 
-    @property
+    @property # When you define a method with @property above it,
+    # you can access it like a regular attribute (i.e., object.attribute)
+    # instead of calling it like a method (i.e., object.method()).
     def dataset_name(self) -> str:
         return self.plans['dataset_name']
 

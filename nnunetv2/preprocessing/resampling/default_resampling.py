@@ -8,6 +8,7 @@ from batchgenerators.augmentations.utils import resize_segmentation
 from scipy.ndimage.interpolation import map_coordinates
 from skimage.transform import resize
 from nnunetv2.configuration import ANISO_THRESHOLD
+from log import logger
 
 
 def get_do_separate_z(spacing: Union[Tuple[float, ...], List[float], np.ndarray], anisotropy_threshold=ANISO_THRESHOLD):
@@ -25,6 +26,7 @@ def compute_new_shape(old_shape: Union[Tuple[int, ...], List[int], np.ndarray],
                       new_spacing: Union[Tuple[float, ...], List[float], np.ndarray]) -> np.ndarray:
     assert len(old_spacing) == len(old_shape)
     assert len(old_shape) == len(new_spacing)
+    logger.info("given old_spacing,new_spacing and old_shape,derive the new_shape")
     new_shape = np.array([int(round(i / j * k)) for i, j, k in zip(old_spacing, new_spacing, old_shape)])
     return new_shape
 
@@ -87,15 +89,15 @@ def resample_data_or_seg_to_shape(data: Union[torch.Tensor, np.ndarray],
     """
     if isinstance(data, torch.Tensor):
         data = data.cpu().numpy()
-    if force_separate_z is not None:
-        do_separate_z = force_separate_z
+    if force_separate_z is not None: # if force seperate z or not is mentioned in input
+        do_separate_z = force_separate_z    # do as what it says
         if force_separate_z:
-            axis = get_lowres_axis(current_spacing)
+            axis = get_lowres_axis(current_spacing) # find the aixs with the max spacing also the lowest res
         else:
             axis = None
     else:
-        if get_do_separate_z(current_spacing, separate_z_anisotropy_threshold):
-            do_separate_z = True
+        if get_do_separate_z(current_spacing, separate_z_anisotropy_threshold):# 如果当前最大轴和最小轴的比值大于阈值
+            do_separate_z = True # do seperate z
             axis = get_lowres_axis(current_spacing)
         elif get_do_separate_z(new_spacing, separate_z_anisotropy_threshold):
             do_separate_z = True
@@ -105,6 +107,7 @@ def resample_data_or_seg_to_shape(data: Union[torch.Tensor, np.ndarray],
             axis = None
 
     if axis is not None:
+        # in what case we don't want to resample
         if len(axis) == 3:
             # every axis has the same spacing, this should never happen, why is this code here?
             do_separate_z = False

@@ -63,6 +63,8 @@ from torch.cuda import device_count
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from log import logger
+
 
 class nnUNetTrainer(object):
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, unpack_dataset: bool = True,
@@ -105,6 +107,7 @@ class nnUNetTrainer(object):
         # would also pickle the network etc. Bad, bad. Instead we just reinstantiate and then load the checkpoint we
         # need. So let's save the init args
         self.my_init_kwargs = {}
+        ## write all keys of __init__ into my_init_kwargs
         for k in inspect.signature(self.__init__).parameters.keys():
             self.my_init_kwargs[k] = locals()[k]
 
@@ -141,6 +144,9 @@ class nnUNetTrainer(object):
         ### Some hyperparameters for you to fiddle with
         self.initial_lr = 1e-2
         self.weight_decay = 3e-5
+        # As the nnU-Net framework uses a 33% random foreground oversampling strategy,
+        # the large patches and the batch-Dice formulation,
+        # make the baseline nnU-Net already stable against missing classes.
         self.oversample_foreground_percent = 0.33
         self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
@@ -198,26 +204,41 @@ class nnUNetTrainer(object):
                                also_print_to_console=True, add_timestamp=False)
 
     def initialize(self):
+        logger.debug("Initializing nnUNetTrainer\n\n")
         if not self.was_initialized:
+
             self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager,
                                                                    self.dataset_json)
+            logger.debug("call self.build_network_architecture")
 
             self.network = self.build_network_architecture(
-                self.plans_manager,
-                self.dataset_json,
-                self.configuration_manager,
+                self.plans_manager, # PlansManager类的一个实例
+                self.dataset_json, # 数据集的json文件
+                self.configuration_manager,# 从plans.json读出参数，组成ConfigurationManager类的一个实例
                 self.num_input_channels,
                 self.enable_deep_supervision,
             ).to(self.device)
+
             # compile network for free speedup
+            # compile是torch2.0的一个新特性，可以这样调用，也可以作为装饰器
+            # 针对的是计算卡，100系列，GTX不知道
             if self._do_i_compile():
+                logger.debug("compling network")
                 self.print_to_log_file('Compiling network...')
                 self.network = torch.compile(self.network)
 
             self.optimizer, self.lr_scheduler = self.configure_optimizers()
             # if ddp, wrap in DDP wrapper
             if self.is_ddp:
+                logger.debug("dealing with DDP")
+
+                # 就是同步的batchnorm，Applies Batch Normalization over a N-Dimensional input
+                # (a mini-batch of [N-2]D inputs with additional channel dimension)
+                # during training this layer keeps running estimates of its computed mean and variance,
+                # which are then used for normalization during evaluation.
+                # The running estimates are kept with a default momentum of 0.1.
                 self.network = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.network)
+
                 self.network = DDP(self.network, device_ids=[self.local_rank])
 
             self.loss = self._build_loss()
@@ -230,6 +251,8 @@ class nnUNetTrainer(object):
         return ('nnUNet_compile' in os.environ.keys()) and (os.environ['nnUNet_compile'].lower() in ('true', '1', 't'))
 
     def _save_debug_information(self):
+        # notice this is an internal method suppose to be called by only methods inside class,
+        # question: see if all other method call this
         # saving some debug information
         if self.local_rank == 0:
             dct = {}
@@ -289,19 +312,28 @@ class nnUNetTrainer(object):
         should be generated. label_manager takes care of all that for you.)
 
         """
+        logger.debug("in build_network_architecture,simply calling get_network_from_plans and return its output")
         return get_network_from_plans(plans_manager, dataset_json, configuration_manager,
                                       num_input_channels, deep_supervision=enable_deep_supervision)
 
+    ## the prefix "_" means that this function is private to this class
     def _get_deep_supervision_scales(self):
+        # question： what can this "scale" do?
+        # Downscales data_dict[input_key] according to ds_scales.
+        # Each entry in ds_scales specified one deep supervision
+        # output and its resolution relative to the original data,
+        # for example 0.25 specifies 1/4 of the original shape.
         if self.enable_deep_supervision:
             deep_supervision_scales = list(list(i) for i in 1 / np.cumprod(np.vstack(
-                self.configuration_manager.pool_op_kernel_sizes), axis=0))[:-1]
+                self.configuration_manager.pool_op_kernel_sizes), axis=0))[:-1] # 最后一个是网络的输出，不算deep supervision
         else:
             deep_supervision_scales = None  # for train and val_transforms
         return deep_supervision_scales
 
     def _set_batch_size_and_oversample(self):
+        # 主要是针对DDP的
         if not self.is_ddp:
+            # 如果没用DDP的话，只要下面这一行就够了
             # set batch size to what the plan says, leave oversample untouched
             self.batch_size = self.configuration_manager.batch_size
         else:
@@ -349,12 +381,14 @@ class nnUNetTrainer(object):
 
     def _build_loss(self):
         if self.label_manager.has_regions:
+            # 第一个{}是BCE，第二个{}是soft dice
             loss = DC_and_BCE_loss({},
                                    {'batch_dice': self.configuration_manager.batch_dice,
                                     'do_bg': True, 'smooth': 1e-5, 'ddp': self.is_ddp},
                                    use_ignore_label=self.label_manager.ignore_label is not None,
                                    dice_class=MemoryEfficientSoftDiceLoss)
         else:
+            # 第一个{}是soft dice，第二个是CE
             loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
                                    'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
                                   ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
@@ -523,41 +557,61 @@ class nnUNetTrainer(object):
         :return:
         """
         if self.fold == "all":
-            # if fold==all then we use all images for training and validation
+            # fold本来应该是[0,4]区间内的一个int，但是如果 == "all",
+            # 就用所有的数据做train，所有的数据做validation
+            # get_case_identifiers就是取出所有npz文件的名字，放在list里返回
+            # case_identifiers = [0000,0001,0002...]
             case_identifiers = get_case_identifiers(self.preprocessed_dataset_folder)
             tr_keys = case_identifiers
             val_keys = tr_keys
         else:
+            #创建splits_final.json文件，assign给splits_file
             splits_file = join(self.preprocessed_dataset_folder_base, "splits_final.json")
+
             dataset = nnUNetDataset(self.preprocessed_dataset_folder, case_identifiers=None,
                                     num_images_properties_loading_threshold=0,
                                     folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage)
             # if the split file does not exist we need to create it
             if not isfile(splits_file):
+                #如果splits_final.json文件还不存在，就创建一个
                 self.print_to_log_file("Creating new 5-fold cross-validation split...")
                 splits = []
                 all_keys_sorted = np.sort(list(dataset.keys()))
+                logger.debug("call KFold from sklearn to split the data")
+                # Kfold的标准用法，忘了就去看文档
                 kfold = KFold(n_splits=5, shuffle=True, random_state=12345)
                 for i, (train_idx, test_idx) in enumerate(kfold.split(all_keys_sorted)):
+                    # all_keys_sorted = [1,2,3,4,5]
+                    # a,b = next(kfold.split(all_keys_sorted))
+                    # a = [1,2,3,4], b = [0]
                     train_keys = np.array(all_keys_sorted)[train_idx]
                     test_keys = np.array(all_keys_sorted)[test_idx]
+                    # split = [{"train":[0000,0003,0005...],"val":[0001,0002,0004...]},
+                    #          {"train":[0001,0004,0005...],"val":[0000,0002,0003...]}...
                     splits.append({})
                     splits[-1]['train'] = list(train_keys)
                     splits[-1]['val'] = list(test_keys)
                 save_json(splits, splits_file)
 
             else:
+                #如果已经有了splits_final.json文件，就直接读取
                 self.print_to_log_file("Using splits from existing split file:", splits_file)
                 splits = load_json(splits_file)
                 self.print_to_log_file(f"The split file contains {len(splits)} splits.")
 
             self.print_to_log_file("Desired fold for training: %d" % self.fold)
             if self.fold < len(splits):
+                # 这里就是 fold=0的情况：
+                # question:这里并没有根据self.fold来更改split
+                # 根本不用改，如果self.fold < len(splits)，
+                # 那么fold数在范围内，split就可以用，只要输出一个size数量就可以了
                 tr_keys = splits[self.fold]['train']
                 val_keys = splits[self.fold]['val']
                 self.print_to_log_file("This split has %d training and %d validation cases."
                                        % (len(tr_keys), len(val_keys)))
             else:
+                # 定义的是5 split，len(splits)=5，所以fold最大取到4(0~4),如果fold=5就超了
+                # 超了就不做kfold了，直接八二开
                 self.print_to_log_file("INFO: You requested fold %d for training but splits "
                                        "contain only %d folds. I am now creating a "
                                        "random (but seeded) 80:20 split!" % (self.fold, len(splits)))
@@ -570,7 +624,11 @@ class nnUNetTrainer(object):
                 val_keys = [keys[i] for i in idx_val]
                 self.print_to_log_file("This random 80:20 split has %d training and %d validation cases."
                                        % (len(tr_keys), len(val_keys)))
+
+
             if any([i in val_keys for i in tr_keys]):
+                # train和validation有重合的case，提示一下
+                # attention:注意这里case就是example，两个词一样的
                 self.print_to_log_file('WARNING: Some validation cases are also in the training set. Please check the '
                                        'splits.json or ignore if this is intentional.')
         return tr_keys, val_keys
@@ -592,6 +650,7 @@ class nnUNetTrainer(object):
     def get_dataloaders(self):
         # we use the patch size to determine whether we need 2D or 3D dataloaders. We also use it to determine whether
         # we need to use dummy 2D augmentation (in case of 3D training) and what our initial patch size should be
+
         patch_size = self.configuration_manager.patch_size
         dim = len(patch_size)
 
@@ -631,6 +690,7 @@ class nnUNetTrainer(object):
             mt_gen_train = SingleThreadedAugmenter(dl_tr, tr_transforms)
             mt_gen_val = SingleThreadedAugmenter(dl_val, val_transforms)
         else:
+            # mt? ment? augment? mt可能是augment的意思，gen应该是generate
             mt_gen_train = LimitedLenWrapper(self.num_iterations_per_epoch, data_loader=dl_tr, transform=tr_transforms,
                                              num_processes=allowed_num_processes, num_cached=6, seeds=None,
                                              pin_memory=self.device.type == 'cuda', wait_time=0.02)
@@ -641,6 +701,7 @@ class nnUNetTrainer(object):
         return mt_gen_train, mt_gen_val
 
     def get_plain_dataloaders(self, initial_patch_size: Tuple[int, ...], dim: int):
+
         dataset_tr, dataset_val = self.get_tr_and_val_datasets()
 
         if dim == 2:
@@ -691,8 +752,10 @@ class nnUNetTrainer(object):
         if do_dummy_2d_data_aug:
             ignore_axes = (0,)
             tr_transforms.append(Convert3DTo2DTransform())
+            # 做2d增强 只取width和height
             patch_size_spatial = patch_size[1:]
         else:
+            # 不做2d增强，patch就是3d的
             patch_size_spatial = patch_size
             ignore_axes = None
 
@@ -719,7 +782,7 @@ class nnUNetTrainer(object):
         tr_transforms.append(ContrastAugmentationTransform(p_per_sample=0.15))
         tr_transforms.append(SimulateLowResolutionTransform(zoom_range=(0.5, 1), per_channel=True,
                                                             p_per_channel=0.5,
-                                                            order_downsample=0, order_upsample=3, p_per_sample=0.25,
+                                                           order_downsample=0, order_upsample=3, p_per_sample=0.25,
                                                             ignore_axes=ignore_axes))
         tr_transforms.append(GammaTransform((0.7, 1.5), True, True, retain_stats=True, p_per_sample=0.1))
         tr_transforms.append(GammaTransform((0.7, 1.5), False, True, retain_stats=True, p_per_sample=0.3))
@@ -773,27 +836,39 @@ class nnUNetTrainer(object):
         regions: List[Union[List[int], Tuple[int, ...], int]] = None,
         ignore_label: int = None,
     ) -> AbstractTransform:
+
         val_transforms = []
+        # 把label里所有的remove_label(-1)都换成replace_with(0)
         val_transforms.append(RemoveLabelTransform(-1, 0))
 
         if is_cascaded:
+            # is_cascaded就是lowres和fullres串联的标志位
+            # question：为什么要MoveSegAsOneHotToData？？
             val_transforms.append(MoveSegAsOneHotToData(1, foreground_labels, 'seg', 'data'))
 
-        val_transforms.append(RenameTransform('seg', 'target', True))
+        # 就是单纯换个字典的key,把原先的删掉
+        val_transforms.append(RenameTransform('seg', 'target', delete_old=True))
 
         if regions is not None:
+            #  regions=self.label_manager.foreground_regions if
+            #  self.label_manager.has_regions else None
             # the ignore label must also be converted
             val_transforms.append(ConvertSegmentationToRegionsTransform(list(regions) + [ignore_label]
                                                                         if ignore_label is not None else regions,
                                                                         'target', 'target'))
 
         if deep_supervision_scales is not None:
+            # Downscales data_dict[input_key] according to ds_scales.
+            # Each entry in ds_scales specified one deep supervision
+            # output and its resolution relative to the original data,
+            # for example 0.25 specifies 1/4 of the original shape.
             val_transforms.append(DownsampleSegForDSTransform2(deep_supervision_scales, 0, input_key='target',
                                                                output_key='target'))
 
         val_transforms.append(NumpyToTensor(['data', 'target'], 'float'))
         val_transforms = Compose(val_transforms)
         return val_transforms
+    # question :所以tr_transforms和val_transforms都是list[class]吗？ 这两个要怎么用？
 
     def set_deep_supervision_enabled(self, enabled: bool):
         """
@@ -894,7 +969,8 @@ class nnUNetTrainer(object):
         self.optimizer.zero_grad(set_to_none=True)
         # Autocast is a little bitch.
         # If the device_type is 'cpu' then it's slow as heck and needs to be disabled.
-        # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
+        # If the device_type is 'mps' then it will complain that mps is not implemented,
+        # even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
         # So autocast will only be active if we have a cuda device.
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             output = self.network(data)

@@ -58,12 +58,18 @@ def get_filenames_of_train_images_and_targets(raw_dataset_folder: str, dataset_j
             dataset[k]['label'] = os.path.abspath(join(raw_dataset_folder, dataset[k]['label'])) if not os.path.isabs(dataset[k]['label']) else dataset[k]['label']
             dataset[k]['images'] = [os.path.abspath(join(raw_dataset_folder, i)) if not os.path.isabs(i) else i for i in dataset[k]['images']]
     else:
+        # identifiers = array(['0000', '0001', '0002', '0003',...])
         identifiers = get_identifiers_from_splitted_dataset_folder(join(raw_dataset_folder, 'imagesTr'), dataset_json['file_ending'])
+
+        # 注意imagesTr和labelsTr里的niigz的命名规则不同，create_lists_from_splitted_dataset_folder可以用在imagesTr里，但是不能用在labelsTr里
         images = create_lists_from_splitted_dataset_folder(join(raw_dataset_folder, 'imagesTr'), dataset_json['file_ending'], identifiers)
         segs = [join(raw_dataset_folder, 'labelsTr', i + dataset_json['file_ending']) for i in identifiers]
+
         dataset = {i: {'images': im, 'label': se} for i, im, se in zip(identifiers, images, segs)}
+
     return dataset
 
 
 if __name__ == '__main__':
-    print(get_filenames_of_train_images_and_targets(join(nnUNet_raw, 'Dataset002_Heart')))
+    print(get_filenames_of_train_images_and_targets(join(nnUNet_raw, 'Dataset011_quarter_ACDC')))
+    pass

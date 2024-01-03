@@ -6,6 +6,13 @@ from nnunetv2.dataset_conversion.generate_dataset_json import generate_dataset_j
 from nnunetv2.paths import nnUNet_raw
 
 
+# feature：scr dataset folder should have subfolder named exactly as 'training' and 'testing'
+def create_path(path):
+    if os.path.exists(path) is True:
+        shutil.rmtree(path)
+    os.mkdir(path)
+    return path
+
 def make_out_dirs(dataset_id: int, task_name="ACDC"):
     dataset_name = f"Dataset{dataset_id:03d}_{task_name}"
 
@@ -69,19 +76,23 @@ def convert_acdc(src_data_folder: str, dataset_id=27):
 
 
 if __name__ == "__main__":
-    import argparse
+    # import argparse
+    #
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument(
+    #     "-i",
+    #     "--input_folder",
+    #     type=str,
+    #     help="The downloaded ACDC dataset dir. Should contain extracted 'training' and 'testing' folders.",
+    # )
+    # parser.add_argument(
+    #     "-d", "--dataset_id", required=False, type=int, default=27, help="nnU-Net Dataset ID, default: 27"
+    # )
+    # args = parser.parse_args()
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-i",
-        "--input_folder",
-        type=str,
-        help="The downloaded ACDC dataset dir. Should contain extracted 'training' and 'testing' folders.",
-    )
-    parser.add_argument(
-        "-d", "--dataset_id", required=False, type=int, default=27, help="nnU-Net Dataset ID, default: 27"
-    )
-    args = parser.parse_args()
+    input_folder = r'D:\Dataset\OpenDataset'
+    dataset_id = 11
+
     print("Converting...")
-    convert_acdc(args.input_folder, args.dataset_id)
+    convert_acdc(input_folder, dataset_id)
     print("Done!")

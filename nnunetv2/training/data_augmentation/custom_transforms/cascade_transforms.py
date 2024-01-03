@@ -21,17 +21,28 @@ class MoveSegAsOneHotToData(AbstractTransform):
         self.index_in_origin = index_in_origin
 
     def __call__(self, **data_dict):
+        # a[:,1].shape
+        # (3, 32, 32, 32)
+        # a[:,1:2].shape
+        # (3, 1, 32, 32, 32)
+        # 把channel切得只剩index_in_origin那一层
         seg = data_dict[self.key_origin][:, self.index_in_origin:self.index_in_origin+1]
-
+        # 生成一个空的nparray，batch和三维不变，channel数等于all_labels
         seg_onehot = np.zeros((seg.shape[0], len(self.all_labels), *seg.shape[2:]),
                               dtype=data_dict[self.key_target].dtype)
         for i, l in enumerate(self.all_labels):
+            # seg有且只有一个channel
+            # i：逐个写入onehot的channels
+            # 所有seg等于l的位置，对应seg_onehot写1
             seg_onehot[:, i][seg[:, 0] == l] = 1
-
+        # 把seg_onehot拼接到data_dict[key_target]的最后一维
+        # question:appends it to data_dict[key_target],why?
         data_dict[self.key_target] = np.concatenate((data_dict[self.key_target], seg_onehot), 1)
 
         if self.remove_from_origin:
+            # remaining channels are all channels except index_in_origin
             remaining_channels = [i for i in range(data_dict[self.key_origin].shape[1]) if i != self.index_in_origin]
+            # remaining_channels是一个list，用list切片出对应的通道
             data_dict[self.key_origin] = data_dict[self.key_origin][:, remaining_channels]
 
         return data_dict

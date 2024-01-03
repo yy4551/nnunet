@@ -10,6 +10,7 @@ class RobustCrossEntropyLoss(nn.CrossEntropyLoss):
     input must be logits, not probabilities!
     """
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
+
         if target.ndim == input.ndim:
             assert target.shape[1] == 1
             target = target[:, 0]

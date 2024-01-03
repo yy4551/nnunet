@@ -1,3 +1,5 @@
+import sys
+
 from nnunetv2.configuration import default_num_processes
 from nnunetv2.experiment_planning.plan_and_preprocess_api import extract_fingerprints, plan_experiments, preprocess
 
@@ -198,4 +200,8 @@ def plan_and_preprocess_entry():
 
 
 if __name__ == '__main__':
+    sys.argv = [
+        'plan_and_preprocess_entrypoints.py',
+        '-d','11'
+    ]
     plan_and_preprocess_entry()

@@ -25,12 +25,13 @@ class DC_and_CE_loss(nn.Module):
         self.weight_ce = weight_ce
         self.ignore_label = ignore_label
 
-        self.ce = RobustCrossEntropyLoss(**ce_kwargs)
+        self.ce = RobustCrossEntropyLoss(**ce_kwargs) # 就是torch里的CrossEntropyLoss
         self.dc = dice_class(apply_nonlin=softmax_helper_dim1, **soft_dice_kwargs)
 
     def forward(self, net_output: torch.Tensor, target: torch.Tensor):
         """
         target must be b, c, x, y(, z) with c=1
+        注意看上面！c = 1！
         :param net_output:
         :param target:
         :return:
@@ -74,17 +75,19 @@ class DC_and_BCE_loss(nn.Module):
             bce_kwargs['reduction'] = 'none'
 
         self.weight_dice = weight_dice
-        self.weight_ce = weight_ce
+        self.weight_ce = weight_ce # 这两个参数是让CE和Dice加权再相加，两个weight的默认值都是1
         self.use_ignore_label = use_ignore_label
 
-        self.ce = nn.BCEWithLogitsLoss(**bce_kwargs)
-        self.dc = dice_class(apply_nonlin=torch.sigmoid, **soft_dice_kwargs)
+        self.ce = nn.BCEWithLogitsLoss(**bce_kwargs) # CE用torch自带的BCEWithLogitsLoss
+        self.dc = dice_class(apply_nonlin=torch.sigmoid, **soft_dice_kwargs) # Dice用自己写的SoftDiceLoss
 
     def forward(self, net_output: torch.Tensor, target: torch.Tensor):
         if self.use_ignore_label:
             # target is one hot encoded here. invert it so that it is True wherever we can compute the loss
+            # target[:, -1:]：label的最后一层，mask必须放在最后一层
             mask = (1 - target[:, -1:]).bool()
             # remove ignore channel now that we have the mask
+            # 前面的所有层加起来就是target regions
             target_regions = torch.clone(target[:, :-1])
         else:
             target_regions = target
@@ -92,6 +95,8 @@ class DC_and_BCE_loss(nn.Module):
 
         dc_loss = self.dc(net_output, target_regions, loss_mask=mask)
         if mask is not None:
+            # mask为0的位置，所有label层的对应位置全都清0
+            # 后面的torch.clip(mask.sum())相当于normalization,使ce在[0,1]范围内
             ce_loss = (self.ce(net_output, target_regions) * mask).sum() / torch.clip(mask.sum(), min=1e-8)
         else:
             ce_loss = self.ce(net_output, target_regions)

@@ -19,7 +19,7 @@ from nnunetv2.utilities.dataset_name_id_conversion import maybe_convert_to_datas
 from nnunetv2.utilities.json_export import recursive_fix_for_json_export
 from nnunetv2.utilities.utils import get_identifiers_from_splitted_dataset_folder, \
     get_filenames_of_train_images_and_targets
-
+from log import logger
 
 class ExperimentPlanner(object):
     def __init__(self, dataset_name_or_id: Union[str, int],
@@ -80,6 +80,7 @@ class ExperimentPlanner(object):
         self.plans = None
 
     def determine_reader_writer(self):
+        logger.debug("determine_reader_writer")
         example_image = self.dataset[self.dataset.keys().__iter__().__next__()]['images'][0]
         return determine_reader_writer_from_dataset_json(self.dataset_json, example_image)
 
@@ -94,12 +95,17 @@ class ExperimentPlanner(object):
                                    blocks_per_stage_encoder: Union[int, Tuple[int]],
                                    blocks_per_stage_decoder: Union[int, Tuple[int]],
                                    num_labels: int):
+        logger.debug("static_estimate_VRAM_usage")
         """
         Works for PlainConvUNet, ResidualEncoderUNet
         """
+        logger.debug("2d or 3d?\n")
         dim = len(patch_size)
-        conv_op = convert_dim_to_conv_op(dim)
-        norm_op = get_matching_instancenorm(conv_op)
+        conv_op = convert_dim_to_conv_op(dim)         #nn.Conv1d/2d/3d
+        norm_op = get_matching_instancenorm(conv_op)  #nn.InstanceNorm1d/2d/3d
+        logger.debug(f"dim: {dim}, conv_op: {conv_op}, norm_op: {norm_op}\n")
+
+        logger.debug(f"create instance of {UNet_class}\n")
         net = UNet_class(num_input_channels, n_stages,
                          features_per_stage,
                          conv_op,
@@ -119,6 +125,8 @@ class ExperimentPlanner(object):
         determine_resampling is called within get_plans_for_configuration to allow for different functions for each
         configuration
         """
+        logger.debug("in determine_resampling,assign 'resample_data_or_seg_to_shape' to resampling_data\n"
+                     "and resampling_seg,along with resampling_data_kwargs and resampling_seg_kwargs,for later use\n")
         resampling_data = resample_data_or_seg_to_shape
         resampling_data_kwargs = {
             "is_seg": False,
@@ -144,6 +152,8 @@ class ExperimentPlanner(object):
         functions for each configuration
 
         """
+        logger.debug("in determine_segmentation_softmax_export_fn,assign resample_data_or_seg_to_shape\n"
+                     "to resampling_fn along with resampling_fn_kwargs for later use\n")
         resampling_fn = resample_data_or_seg_to_shape
         resampling_fn_kwargs = {
             "is_seg": False,
@@ -163,12 +173,16 @@ class ExperimentPlanner(object):
         resolution axis. Choosing the median here will result in bad interpolation artifacts that can substantially
         impact performance (due to the low number of slices).
         """
+        logger.debug("determine the full-res target spacing,\n"
+                     "isotropic means the spacing of all axes are close to each other\n"
+                     "anisotropic means the spacing of 1 axis is significantly larger than the others\n")
         if self.overwrite_target_spacing is not None:
             return np.array(self.overwrite_target_spacing)
 
         spacings = self.dataset_fingerprint['spacings']
         sizes = self.dataset_fingerprint['shapes_after_crop']
 
+        # precentile is along the axis so assume from small to large
         target = np.percentile(np.vstack(spacings), 50, 0)
 
         # todo sizes_after_resampling = [compute_new_shape(j, i, target) for i, j in zip(spacings, sizes)]
@@ -202,18 +216,32 @@ class ExperimentPlanner(object):
                   'enforced soon!')
         modalities = self.dataset_json['channel_names'] if 'channel_names' in self.dataset_json.keys() else \
             self.dataset_json['modality']
-        normalization_schemes = [get_normalization_scheme(m) for m in modalities.values()]
+
+        logger.debug(f"from json file we know modality is {modalities}")
+
+        normalization_schemes = [get_normalization_scheme(m) for m in modalities.values()]   # it's object in list
+        logger.debug(f"according to modality,search a mapping dict to decide normalization_schemes\n")
+
         if self.dataset_fingerprint['median_relative_size_after_cropping'] < (3 / 4.):
+            logger.debug("median_relative_size_after_cropping in jason file <0.75,use mask")
             use_nonzero_mask_for_norm = [i.leaves_pixels_outside_mask_at_zero_if_use_mask_for_norm_is_true for i in
                                          normalization_schemes]
+            logger.debug(f'there is a TRUE/FALSE flag in every normalization_scheme,extract it from each normalization_scheme\n'
+                         f'maken them a list according which we do the mask\n')
         else:
+            logger.debug("cool,we dont do mask \n")
             use_nonzero_mask_for_norm = [False] * len(normalization_schemes)
             assert all([i in (True, False) for i in use_nonzero_mask_for_norm]), 'use_nonzero_mask_for_norm must be ' \
                                                                                  'True or False and cannot be None'
-        normalization_schemes = [i.__name__ for i in normalization_schemes]
+        normalization_schemes = [i.__name__ for i in normalization_schemes] # it's string in list
+        logger.debug(f"normalization_schemes = {normalization_schemes}\n"
+                     f"also,return use_nonzero_mask_for_norm = {use_nonzero_mask_for_norm}")
         return normalization_schemes, use_nonzero_mask_for_norm
 
     def determine_transpose(self):
+        logger.debug("transpose input volume to palce the axis with largest spacing on index 0,"
+                     "so that the convolution is applied on the highest resolution plane as we expected\n")
+        # what does this transpose for?
         if self.suppress_transpose:
             return [0, 1, 2], [0, 1, 2]
 
@@ -222,8 +250,16 @@ class ExperimentPlanner(object):
 
         max_spacing_axis = np.argmax(target_spacing)
         remaining_axes = [i for i in list(range(3)) if i != max_spacing_axis]
+
+        # we want the 2D model to operate on the highest resolution plane.
+        # The 2D model always uses the last two dimensions of the 3D image (my_slice = image[slice_index, :, :]).
+        # This is necessary due to the memory layout of the arrays.
+        # image[:, slice_index, :] is MUCH slower
         transpose_forward = [max_spacing_axis] + remaining_axes
+
+        # np.argwhere(np.array(transpose_forward) == i)[0][0] will return the indices where the value i is found in transpose_forward
         transpose_backward = [np.argwhere(np.array(transpose_forward) == i)[0][0] for i in range(3)]
+        logger.debug(f"transpose_forward: {transpose_forward}, transpose_backward: {transpose_backward}")
         return transpose_forward, transpose_backward
 
     def get_plans_for_configuration(self,
@@ -231,6 +267,7 @@ class ExperimentPlanner(object):
                                     median_shape: Union[np.ndarray, Tuple[int, ...], List[int]],
                                     data_identifier: str,
                                     approximate_n_voxels_dataset: float) -> dict:
+        logger.debug("get_plans_for_configuration,a very long function\n")
         assert all([i > 0 for i in spacing]), f"Spacing must be > 0! Spacing: {spacing}"
         # print(spacing, median_shape, approximate_n_voxels_dataset)
         # find an initial patch size
@@ -242,6 +279,9 @@ class ExperimentPlanner(object):
         # this may need to be adapted when using absurdly large GPU memory targets. Increasing this now would not be
         # ideal because large initial patch sizes increase computation time because more iterations in the while loop
         # further down may be required.
+        logger.debug("upscale a volume so it's certainly larger than what we need\n"
+                     "namely, rescale to have the same volume as a patch of size 256 ** 3\n"
+                     "np.prod(shape) = 256 ** 3\n")
         if len(spacing) == 3:
             initial_patch_size = [round(i) for i in tmp * (256 ** 3 / np.prod(tmp)) ** (1 / 3)]
         elif len(spacing) == 2:
@@ -252,10 +292,14 @@ class ExperimentPlanner(object):
         # clip initial patch size to median_shape. It makes little sense to have it be larger than that. Note that
         # this is different from how nnU-Net v1 does it!
         # todo patch size can still get too large because we pad the patch size to a multiple of 2**n
+
         initial_patch_size = np.array([min(i, j) for i, j in zip(initial_patch_size, median_shape[:len(spacing)])])
+        logger.debug("initial path size should not be larger than median_shape but acceptable if smaller than that,\n"
+                     f"so take the minimum of calculated initial patch size and median_shape:{initial_patch_size}\n")
 
         # use that to get the network topology. Note that this changes the patch_size depending on the number of
         # pooling operations (must be divisible by 2**num_pool in each axis)
+        logger.debug("\ncall get_pool_and_conv_props\n")
         network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, \
         shape_must_be_divisible_by = get_pool_and_conv_props(spacing, initial_patch_size,
                                                              self.UNet_featuremap_min_edge_length,
@@ -263,6 +307,10 @@ class ExperimentPlanner(object):
 
         # now estimate vram consumption
         num_stages = len(pool_op_kernel_sizes)
+        logger.debug("1 pooling operation is 1 stage\n"
+                     f"num_stages = {len(pool_op_kernel_sizes)}\n")
+
+        logger.debug("\ncall static_estimate_VRAM_usage\n")
         estimate = self.static_estimate_VRAM_usage(tuple(patch_size),
                                                    num_stages,
                                                    tuple([tuple(i) for i in pool_op_kernel_sizes]),
@@ -283,11 +331,16 @@ class ExperimentPlanner(object):
         reference = (self.UNet_reference_val_2d if len(spacing) == 2 else self.UNet_reference_val_3d) * \
                     (self.UNet_vram_target_GB / self.UNet_reference_val_corresp_GB)
 
+        logger.debug(f"estimate is the output of static_estimate_VRAM_usage{estimate}, \n"
+                      f"reference is given: {reference}\n")
+
         while estimate > reference:
+            logger.debug("estimate > reference, we are going to reduce patch size\n")
             # print(patch_size)
             # patch size seems to be too large, so we need to reduce it. Reduce the axis that currently violates the
             # aspect ratio the most (that is the largest relative to median shape)
             axis_to_be_reduced = np.argsort(patch_size / median_shape[:len(spacing)])[-1]
+            logger.debug(f"take the aixs {axis_to_be_reduced} cuz it has the largest (patch_size / median_shape)\n")
 
             # we cannot simply reduce that axis by shape_must_be_divisible_by[axis_to_be_reduced] because this
             # may cause us to skip some valid sizes, for example shape_must_be_divisible_by is 64 for a shape of 256.
@@ -329,19 +382,28 @@ class ExperimentPlanner(object):
         # executed. If not, additional vram headroom is used to increase batch size
         ref_bs = self.UNet_reference_val_corresp_bs_2d if len(spacing) == 2 else self.UNet_reference_val_corresp_bs_3d
         batch_size = round((reference / estimate) * ref_bs)
+        logger.debug(f"batch_size is compputed as (reference / estimate) * ref_bs = {batch_size} ")
 
-        # we need to cap the batch size to cover at most 5% of the entire dataset. Overfitting precaution. We cannot
+        # we need to cap the batch size to cover at most 5% of the entire dataset. (最高不超过dataset的5%)
+        # Overfitting precaution. We cannot
         # go smaller than self.UNet_min_batch_size though
         bs_corresponding_to_5_percent = round(
             approximate_n_voxels_dataset * 0.05 / np.prod(patch_size, dtype=np.float64))
         batch_size = max(min(batch_size, bs_corresponding_to_5_percent), self.UNet_min_batch_size)
+        logger.debug(f"batch_szie can be no bigger than 5% of entire dataset,which is {bs_corresponding_to_5_percent}\n")
 
+        logger.debug("\ncall determine_resampling\n")
         resampling_data, resampling_data_kwargs, resampling_seg, resampling_seg_kwargs = self.determine_resampling()
+        logger.debug("\ncall determine_segmentation_softmax_export_fn\n")
         resampling_softmax, resampling_softmax_kwargs = self.determine_segmentation_softmax_export_fn()
 
+        logger.debug("\ncall determine_normalization_scheme_and_whether_mask_is_used_for_norm\n")
         normalization_schemes, mask_is_used_for_norm = \
             self.determine_normalization_scheme_and_whether_mask_is_used_for_norm()
         num_stages = len(pool_op_kernel_sizes)
+        logger.debug(f"num_stages = {num_stages},is this value changed? i don't think so\n")
+
+        logger.debug("now we make up the whole plan using everything we got,and then we leave the get_plans_for_configuration\n")
         plan = {
             'data_identifier': data_identifier,
             'preprocessor_name': self.preprocessor_name,
@@ -379,11 +441,14 @@ class ExperimentPlanner(object):
         So for now if you want a different transpose_forward/backward you need to create a new planner. Also not too
         hard.
         """
+        logger.debug("plan_experiment")
 
         # first get transpose
+        logger.debug("call determine_transpose")
         transpose_forward, transpose_backward = self.determine_transpose()
 
         # get fullres spacing and transpose it
+        logger.debug("call determine_fullres_target_spacing")
         fullres_spacing = self.determine_fullres_target_spacing()
         fullres_spacing_transposed = fullres_spacing[transpose_forward]
 
@@ -395,12 +460,17 @@ class ExperimentPlanner(object):
 
         approximate_n_voxels_dataset = float(np.prod(new_median_shape_transposed, dtype=np.float64) *
                                              self.dataset_json['numTraining'])
+        logger.debug(f"total voxel number of the whole dataset: {approximate_n_voxels_dataset}")
+
         # only run 3d if this is a 3d dataset
         if new_median_shape_transposed[0] != 1:
+            logger.debug("call get_plans_for_configuration\n")
             plan_3d_fullres = self.get_plans_for_configuration(fullres_spacing_transposed,
                                                                new_median_shape_transposed,
                                                                self.generate_data_identifier('3d_fullres'),
                                                                approximate_n_voxels_dataset)
+            logger.debug("plan_3d_fullres is the output of get_plans_for_configuration\n")
+
             # maybe add 3d_lowres as well
             patch_size_fullres = plan_3d_fullres['patch_size']
             median_num_voxels = np.prod(new_median_shape_transposed, dtype=np.float64)
@@ -411,33 +481,47 @@ class ExperimentPlanner(object):
 
             spacing_increase_factor = 1.03  # used to be 1.01 but that is slow with new GPU memory estimation!
 
+            logger.debug("creating 3d low res plan\n")
             while num_voxels_in_patch / median_num_voxels < self.lowres_creation_threshold:
                 # we incrementally increase the target spacing. We start with the anisotropic axis/axes until it/they
                 # is/are similar (factor 2) to the other ax(i/e)s.
                 max_spacing = max(lowres_spacing)
                 if np.any((max_spacing / lowres_spacing) > 2):
+                    logger.debug("the minimun spacing axis is 2 times smaller than the maximum spacing axis\n")
                     lowres_spacing[(max_spacing / lowres_spacing) > 2] *= spacing_increase_factor
+                    logger.debug(f"incrementally enlarge,lowres_spacing = {lowres_spacing[(max_spacing / lowres_spacing) > 2]}\n")
                 else:
                     lowres_spacing *= spacing_increase_factor
+                    logger.debug(f"fullres spacing is quite isotropic,so enlarge them together,lowres_spacing={lowres_spacing}\n")
+
                 median_num_voxels = np.prod(plan_3d_fullres['spacing'] / lowres_spacing * new_median_shape_transposed,
                                             dtype=np.float64)
+
+
                 # print(lowres_spacing)
+                logger.debug("creating plan_3d_lowres")
                 plan_3d_lowres = self.get_plans_for_configuration(lowres_spacing,
                                                                   [round(i) for i in plan_3d_fullres['spacing'] /
                                                                    lowres_spacing * new_median_shape_transposed],
                                                                   self.generate_data_identifier('3d_lowres'),
                                                                   float(np.prod(median_num_voxels) *
                                                                         self.dataset_json['numTraining']))
+
+
                 num_voxels_in_patch = np.prod(plan_3d_lowres['patch_size'], dtype=np.int64)
                 print(f'Attempting to find 3d_lowres config. '
                       f'\nCurrent spacing: {lowres_spacing}. '
                       f'\nCurrent patch size: {plan_3d_lowres["patch_size"]}. '
                       f'\nCurrent median shape: {plan_3d_fullres["spacing"] / lowres_spacing * new_median_shape_transposed}')
+
             if plan_3d_lowres is not None:
                 plan_3d_lowres['batch_dice'] = False
                 plan_3d_fullres['batch_dice'] = True
+                logger.debug(f"low res plan exist,then low res batch_dice is false,full res batch_dice is true\n")
             else:
                 plan_3d_fullres['batch_dice'] = False
+                logger.debug("low res plan doesnt exist,full res batch_size is false")
+
         else:
             plan_3d_fullres = None
             plan_3d_lowres = None
@@ -477,6 +561,7 @@ class ExperimentPlanner(object):
                 'foreground_intensity_properties_per_channel']
         }
 
+        logger.debug("writing in plan-config details\n")
         if plan_3d_lowres is not None:
             plans['configurations']['3d_lowres'] = plan_3d_lowres
             if plan_3d_fullres is not None:
@@ -500,6 +585,7 @@ class ExperimentPlanner(object):
         return plans
 
     def save_plans(self, plans):
+        logger.debug("save_plans")
         recursive_fix_for_json_export(plans)
 
         plans_file = join(nnUNet_preprocessed, self.dataset_name, self.plans_identifier + '.json')
@@ -524,11 +610,16 @@ class ExperimentPlanner(object):
         same name. In order to distinguish the associated data we need a data identifier that reflects not just the
         config but also the plans it originates from
         """
+        logger.debug("\ngenerate_data_identifier\n")
         return self.plans_identifier + '_' + configuration_name
 
     def load_plans(self, fname: str):
+        logger.debug("load_plans")
         self.plans = load_json(fname)
 
 
 if __name__ == '__main__':
-    ExperimentPlanner(2, 8).plan_experiment()
+    ExperimentPlanner(11, 6).plan_experiment()
+    # EPer = ExperimentPlanner(11, 6)
+    # print(f"determine_reader_writer:{EPer.determine_reader_writer()}")
+    # print(f"determine_resampling:{EPer.determine_resampling()}")
